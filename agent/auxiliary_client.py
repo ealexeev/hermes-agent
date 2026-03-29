@@ -62,6 +62,9 @@ _OR_HEADERS = {
     "X-OpenRouter-Categories": "productivity,cli-agent",
 }
 
+# Default timeout for call_llm and async_call_llm if none is supplied.
+_CALL_LLM_TIMEOUT = 30.0
+
 # Nous Portal extra_body for product attribution.
 # Callers should pass this as extra_body in chat.completions.create()
 # when the auxiliary client is backed by Nous Portal.
@@ -926,6 +929,43 @@ def _resolve_task_provider_model(
     return "auto", model
 
 
+def _resolve_task_timeout(task: str = None, default_timeout: float = 30.0) -> float:
+    """Resolve timeout for a specific auxiliary task.
+    
+    Priority:
+      1. config.yaml file (auxiliary.{task}.timeout)
+      2. Default value passed as argument (30.0 seconds fallback)
+    
+    Args:
+        task: Auxiliary task name ("compression", "vision", "web_extract", etc.)
+        default_timeout: Default timeout to use if config is missing/invalid
+    
+    Returns:
+        Timeout value in seconds
+    """
+    if not task:
+        return default_timeout
+    
+    try:
+        from hermes_cli.config import load_config
+        config = load_config()
+    except ImportError:
+        return default_timeout
+    
+    # Check auxiliary.{task} section
+    aux = config.get("auxiliary", {})
+    task_config = aux.get(task, {})
+    cfg_timeout = task_config.get("timeout")
+    
+    if cfg_timeout is not None:
+        try:
+            return float(cfg_timeout)
+        except (ValueError, TypeError):
+            pass
+    
+    return default_timeout
+
+
 def _build_call_kwargs(
     provider: str,
     model: str,
@@ -980,7 +1020,7 @@ def call_llm(
     temperature: float = None,
     max_tokens: int = None,
     tools: list = None,
-    timeout: float = 30.0,
+    timeout: Optional[float] = None,
     extra_body: dict = None,
 ) -> Any:
     """Centralized synchronous LLM call.
@@ -1022,12 +1062,12 @@ def call_llm(
         raise RuntimeError(
             f"No LLM provider configured for task={task} provider={resolved_provider}. "
             f"Run: hermes setup")
+    resolved_timeout = timeout or _resolve_task_timeout(task, _CALL_LLM_TIMEOUT)
 
     kwargs = _build_call_kwargs(
         resolved_provider, final_model, messages,
         temperature=temperature, max_tokens=max_tokens,
-        tools=tools, timeout=timeout, extra_body=extra_body)
-
+        tools=tools, timeout=resolved_timeout, extra_body=extra_body)
     # Handle max_tokens vs max_completion_tokens retry
     try:
         return client.chat.completions.create(**kwargs)
@@ -1049,7 +1089,7 @@ async def async_call_llm(
     temperature: float = None,
     max_tokens: int = None,
     tools: list = None,
-    timeout: float = 30.0,
+    timeout: Optional[float] = None,
     extra_body: dict = None,
 ) -> Any:
     """Centralized asynchronous LLM call.
@@ -1072,11 +1112,12 @@ async def async_call_llm(
         raise RuntimeError(
             f"No LLM provider configured for task={task} provider={resolved_provider}. "
             f"Run: hermes setup")
+    resolved_timeout = timeout or _resolve_task_timeout(task, _CALL_LLM_TIMEOUT)
 
     kwargs = _build_call_kwargs(
         resolved_provider, final_model, messages,
         temperature=temperature, max_tokens=max_tokens,
-        tools=tools, timeout=timeout, extra_body=extra_body)
+        tools=tools, timeout=resolved_timeout, extra_body=extra_body)
 
     try:
         return await client.chat.completions.create(**kwargs)
